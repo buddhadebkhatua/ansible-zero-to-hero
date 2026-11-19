@@ -102,8 +102,8 @@ vmware-automation/
 ├── vars.yml
 ├── secrets.yml              # encrypted with Ansible Vault
 ├── create_vms.yml           # multi-VM deployment
-├── create_single_vm_vds.yml # single VM / distributed switch
-└── README.md
+└── create_single_vm_vds.yml # single VM / distributed switch
+
 
 Keep configuration, credentials and playbooks separate. Add version control for playbooks and non-secret variables. Never commit plaintext credentials or Vault passwords.
 7. Inventory configuration
@@ -141,6 +141,7 @@ vcenter_hostname: "vcenter.example.local"
 vcenter_datacenter: "Datacenter1"
 vcenter_cluster: "Cluster1"
 vcenter_datastore: "Datastore1"
+vcenter_folder: "/Lab.com/vm"
 vm_template: "rocky-9-template"
  
 # Network / guest customization
@@ -153,7 +154,7 @@ vms_to_create:
   - name: "dev-node-01"
     ip: "10.2.4.77"
     netmask: "255.255.0.0"
-    gateway: "10.2.50.1"
+    gateway: "10.2.1.1"
     cpu: 2
     ram_mb: 4096
     disk_gb: 40
@@ -161,7 +162,7 @@ vms_to_create:
   - name: "uat-node-01"
     ip: "10.2.4.78"
     netmask: "255.255.0.0"
-    gateway: "10.2.50.1"
+    gateway: "10.2.1.1"
     cpu: 2
     ram_mb: 4096
     disk_gb: 40
@@ -169,7 +170,7 @@ vms_to_create:
   - name: "prod-node-01"
     ip: "10.2.4.79"
     netmask: "255.255.0.0"
-    gateway: "10.2.50.1"
+    gateway: "10.2.1.1"
     cpu: 2
     ram_mb: 4096
     disk_gb: 40
@@ -209,9 +210,11 @@ This playbook clones each VM definition from the template, configures hardware, 
         datacenter: "{{ vcenter_datacenter }}"
         cluster: "{{ vcenter_cluster }}"
         datastore: "{{ vcenter_datastore }}"
+        folder: "{{ vcenter_folder }}"
         template: "{{ vm_template }}"
         name: "{{ item.name }}"
         state: poweredon
+        convert: thin
         wait_for_ip_address: true
         wait_for_ip_address_timeout: 600
         wait_for_customization: true
