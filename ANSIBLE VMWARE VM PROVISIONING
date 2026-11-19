@@ -370,7 +370,3 @@ DNS	                  Configured resolvers and resolution works                 
 Network reachability	Gateway and approved destinations reachable	                    ping / traceroute as permitted
 Remote access	        SSH or approved management access succeeds	                    SSH test from admin network
 VMware Tools	        Running/healthy	                                                vCenter Guest Tools status; systemctl status vmtoolsd
-
-
-1.0	19-Nov-2026	Reorganized original notes into an implementation and operations guide; standardized YAML; added validation, troubleshooting, security and rollback guidance.	Infrastructure Operations
-
