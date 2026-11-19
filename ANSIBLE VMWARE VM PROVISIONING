@@ -1,0 +1,376 @@
+  =============== VMWARE VM PROVISIONING USING ANSIBLE =================
+                Technical Implementation & Operations Guide
+
+
+Automated virtual machine deployment from golden templates with static networking and VMware Distributed Switch support
+ 
+1. Purpose
+This guide documents how to provision virtual machines in VMware vSphere using Ansible. The automation clones a prepared golden template, assigns compute and storage resources, configures the virtual network and guest operating-system identity/network settings, and reports deployment results.
+
+2. Scope and deployment patterns
+Multi-VM deployment:	Create several VMs in one run (for example Development, UAT and Production)	Loop through a list of VM definitions in vars.yml
+Single VM on Distributed Switch:	Deploy one VM to a specified distributed port group	Uses a VM-specific variable set and the dvswitch_name parameter
+This guide does not automate creation of datacenters, clusters, datastores, distributed switches, distributed port groups, VLANs, IPAM reservations, firewall rules, DNS records, application installation, or monitoring enrollment. Those items must exist or be handled by separate workflows unless the scope is explicitly extended.
+
+3. Architecture and workflow
+Ansible runs from a Linux control node and communicates with vCenter through the VMware API. Guest customization is applied by vSphere to the cloned VM. VMware Tools/open-vm-tools in the guest is required for IP reporting and customization workflows.
+
+Ansible control node	Runs the playbook, Python dependencies and VMware collection
+vCenter Server	API endpoint; manages inventory, template cloning, VM hardware and network assignment
+Golden template	Prepared base operating system image with VMware Tools/open-vm-tools and supported customization prerequisites
+Cluster / ESXi hosts	Compute placement and execution of VM
+Datastore	Stores VM configuration and virtual disks
+Port group / Distributed port group	Provides VM network connectivity and VLAN policy
+Guest OS	Receives hostname, DNS and static IP customization
+
+1.	Operator reviews the request and confirms VM name, IP, resources, target environment and network.
+2.	Control node validates inventory, configuration and credentials.
+3.	Ansible connects to vCenter and clones the selected template.
+4.	VM hardware and disk settings are applied.
+5.	Virtual NIC is connected to the requested network.
+6.	Guest customization is applied; the VM is powered on.
+7.	Automation waits for customization/IP detection where configured.
+8.	Operator validates vCenter inventory, guest networking and access.
+
+4. Prerequisites
+4.1 Control node
+•	Linux control node with supported Python and Ansible versions.
+•	Network reachability to vCenter HTTPS/API endpoint (normally TCP 443).
+•	DNS resolution and correct time synchronization.
+•	Administrative or delegated vCenter account with permissions to clone/create VMs, assign resources, connect NICs and customize guests.
+•	Python dependencies compatible with the selected Ansible and community.vmware collection versions.
+•	Approved CA certificate available if vCenter uses an internal certificate authority.
+
+4.2 Example installation
+Use a Python virtual environment to isolate automation dependencies. Confirm the versions in your environment and pin them for repeatable runs.
+# Example on a Debian/Ubuntu-based control node
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip
+ 
+mkdir -p ~/vmware-automation
+cd ~/vmware-automation
+python3 -m venv .venv
+source .venv/bin/activate
+ 
+python -m pip install --upgrade pip
+python -m pip install pyvmomi requests
+ 
+ansible-galaxy collection install community.vmware
+ 
+ansible --version
+ansible-galaxy collection list
+python -m pip show pyvmomi requests
+
+Note: Some newer collection versions may require a particular Python/Ansible version or additional dependencies. Check the collection requirements before installation; avoid installing packages into the system Python where the OS manages it.
+4.3 VMware prerequisites
+•	Target datacenter and cluster exist and are spelled exactly as they appear in vCenter.
+•	Target datastore is accessible to the selected cluster/host.
+•	VM template exists, is powered off, and is suitable for cloning.
+•	Target standard port group or distributed port group exists and is accessible to the target cluster/hosts.
+•	IP address, subnet mask, gateway and DNS values have been approved and are not already in use.
+•	vCenter account permissions are sufficient. Free ESXi licensing does not support the API write operations required by these modules.
+5. Golden template preparation
+Prepare and test a template before automation. Template quality directly affects cloning, customization and boot reliability.
+5.1 Guest packages and prerequisites
+# RHEL / Rocky Linux example
+sudo dnf install -y open-vm-tools perl
+sudo systemctl enable --now vmtoolsd
+ 
+# Ubuntu example (package names can differ by release)
+sudo apt update
+sudo apt install -y open-vm-tools
+sudo systemctl enable --now open-vm-tools
+
+Validate that VMware Tools is running and that the guest OS is supported for vSphere customization. Linux customization generally requires VMware Tools/open-vm-tools and Perl in the template.
+5.2 Template hygiene
+•	Patch the base OS and remove temporary files, logs and unused packages according to your image standard.
+•	Remove machine-specific identity data only using the approved OS-specific template process. Do not blindly remove identity files without understanding the operating-system behavior.
+•	Ensure SSH host keys are regenerated on first boot by the template's supported mechanism. If manually deleting host keys, verify that a regeneration service or first-boot process exists.
+•	Review cloud-init or other provisioning agents; avoid having two tools compete to configure hostname, IP or DNS.
+•	Check firewall, SELinux, SSH, time synchronization and monitoring-agent baseline settings.
+•	Power off the template cleanly before converting it to a template.
+•	Document template name, OS version, patch date, owner and validation date.
+5.3 Convert to template
+9.	In vCenter, select the prepared VM.
+10.	Confirm it is powered off.
+11.	Choose the template conversion action (menu wording varies by vSphere version).
+12.	Assign a clear template name and record it in the automation variables.
+13.	Test a manual clone and guest customization before using the template in automation.
+6. Project layout
+vmware-automation/
+├── inventory.ini
+├── vars.yml
+├── secrets.yml              # encrypted with Ansible Vault
+├── create_vms.yml           # multi-VM deployment
+├── create_single_vm_vds.yml # single VM / distributed switch
+└── README.md
+
+Keep configuration, credentials and playbooks separate. Add version control for playbooks and non-secret variables. Never commit plaintext credentials or Vault passwords.
+7. Inventory configuration
+# inventory.ini
+[local]
+localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
+
+The VMware API tasks run locally from the control node, so the localhost inventory is used. If a virtual environment is used, set ansible_python_interpreter to the Python executable in that environment (for example, the full path to .venv/bin/python).
+8. Credential management with Ansible Vault
+Create a secrets file and encrypt it before storing it on disk or in version control.
+# Create the file (enter credentials in your editor)
+ansible-vault create secrets.yml
+ 
+# Example content inside the encrypted file:
+vcenter_user: "automation-account@vsphere.local"
+vcenter_pass: "REPLACE_WITH_REAL_SECRET"
+ 
+# Encrypt an existing file:
+ansible-vault encrypt secrets.yml
+ 
+# Edit securely:
+ansible-vault edit secrets.yml
+ 
+# Verify that it is encrypted:
+head -n 1 secrets.yml
+
+•	Use a dedicated least-privilege automation account instead of a personal administrator account.
+•	Store the Vault password in an approved secret manager or protected operational process; do not put it in scripts or shell history.
+•	Restrict file permissions for the project and encrypted secrets.
+•	Rotate credentials periodically and after suspected exposure.
+9. Configuration — multi-VM deployment
+The following sample is illustrative. Replace names, IP addresses, gateways, DNS and network labels with values approved for your environment. Check IP allocation before running.
+# vars.yml
+vcenter_hostname: "vcenter.example.local"
+vcenter_datacenter: "Datacenter1"
+vcenter_cluster: "Cluster1"
+vcenter_datastore: "Datastore1"
+vm_template: "rocky-9-template"
+ 
+# Network / guest customization
+vm_network: "VM Network"
+dns_servers:
+  - "10.2.0.10"
+  - "10.2.0.11"
+ 
+vms_to_create:
+  - name: "dev-node-01"
+    ip: "10.2.4.77"
+    netmask: "255.255.0.0"
+    gateway: "10.2.50.1"
+    cpu: 2
+    ram_mb: 4096
+    disk_gb: 40
+ 
+  - name: "uat-node-01"
+    ip: "10.2.4.78"
+    netmask: "255.255.0.0"
+    gateway: "10.2.50.1"
+    cpu: 2
+    ram_mb: 4096
+    disk_gb: 40
+ 
+  - name: "prod-node-01"
+    ip: "10.2.4.79"
+    netmask: "255.255.0.0"
+    gateway: "10.2.50.1"
+    cpu: 2
+    ram_mb: 4096
+    disk_gb: 40
+
+10. Multi-VM deployment playbook
+This playbook clones each VM definition from the template, configures hardware, disk, network and guest customization, then reports the result. Review the task parameters and module version against the installed collection.
+---
+- name: Deploy multiple VMs in VMware vSphere
+  hosts: local
+  gather_facts: false
+ 
+  vars_files:
+    - vars.yml
+    - secrets.yml
+ 
+  tasks:
+    - name: Validate VM definitions
+      ansible.builtin.assert:
+        that:
+          - vms_to_create | length > 0
+          - item.name | length > 0
+          - item.cpu | int > 0
+          - item.ram_mb | int > 0
+          - item.disk_gb | int > 0
+          - item.ip is defined
+          - item.netmask is defined
+          - item.gateway is defined
+        fail_msg: "Invalid VM definition: {{ item.name | default('unnamed') }}"
+      loop: "{{ vms_to_create }}"
+ 
+    - name: Clone and configure VMs from template
+      community.vmware.vmware_guest:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_user }}"
+        password: "{{ vcenter_pass }}"
+        validate_certs: true
+        datacenter: "{{ vcenter_datacenter }}"
+        cluster: "{{ vcenter_cluster }}"
+        datastore: "{{ vcenter_datastore }}"
+        template: "{{ vm_template }}"
+        name: "{{ item.name }}"
+        state: poweredon
+        wait_for_ip_address: true
+        wait_for_ip_address_timeout: 600
+        wait_for_customization: true
+        wait_for_customization_timeout: 600
+        hardware:
+          memory_mb: "{{ item.ram_mb }}"
+          num_cpus: "{{ item.cpu }}"
+          scsi: paravirtual
+        disk:
+          - size_gb: "{{ item.disk_gb }}"
+            type: thin
+            datastore: "{{ vcenter_datastore }}"
+        networks:
+          - name: "{{ vm_network }}"
+            ip: "{{ item.ip }}"
+            netmask: "{{ item.netmask }}"
+            gateway: "{{ item.gateway }}"
+            type: static
+            connected: true
+            start_connected: true
+        customization:
+          hostname: "{{ item.name }}"
+          dns_servers: "{{ dns_servers }}"
+      loop: "{{ vms_to_create }}"
+      register: vm_deploy_result
+ 
+    - name: Display VM deployment summary
+      ansible.builtin.debug:
+        msg: >-
+          VM {{ item.item.name }} deployment task completed.
+          Reported IP: {{ item.instance.ipv4 | default('IP not reported') }}
+      loop: "{{ vm_deploy_result.results }}
+
+Operational note: waiting for guest customization and IP reporting depends on VMware Tools and guest behavior. A timeout should be investigated rather than treated as proof that the VM was not created.
+11. Execution — multi-VM workflow
+14.	Change into the project directory.
+15.	Activate the Python virtual environment if used.
+16.	Review vars.yml, especially names, IP addresses, network, template, datastore and resource sizing.
+17.	Confirm secrets.yml is encrypted and available.
+18.	Run the syntax check.
+19.	Run the playbook and enter the Vault password when prompted.
+20.	Review task output and the final VM summary.
+cd ~/vmware-automation
+source .venv/bin/activate
+ 
+ansible-playbook -i inventory.ini create_vms.yml --syntax-check
+ansible-playbook -i inventory.ini create_vms.yml --ask-vault-pass
+
+Where supported, use check mode first to inspect potential changes; VMware module check-mode behavior may not predict every clone/customization operation, so it is not a substitute for review.
+12. Single VM deployment on a Distributed Switch
+Use this workflow when one VM must be connected to a named distributed virtual switch and distributed port group. The port group name is supplied as the network name; dvswitch_name identifies the distributed switch.
+12.1 Variables
+# vars.yml - single VM example
+vcenter_hostname: "vcenter.example.local"
+vcenter_datacenter: "Datacenter1"
+vcenter_cluster: "Cluster1"
+vcenter_datastore: "Datastore1"
+vm_template: "rocky-9-template"
+ 
+vds_name: "DSwitch-Prod"
+vds_portgroup: "DPG-VLAN100"
+ 
+vm_name: "app-node-01"
+vm_ip: "10.2.4.80"
+vm_netmask: "255.255.0.0"
+vm_gateway: "10.2.50.1"
+vm_cpu: 2
+vm_ram_mb: 4096
+vm_disk_gb: 40
+ 
+dns_servers:
+  - "10.2.0.10"
+  - "10.2.0.11
+
+12.2 Playbook
+---
+- name: Deploy one VM on a VMware Distributed Switch
+  hosts: local
+  gather_facts: false
+ 
+  vars_files:
+    - vars.yml
+    - secrets.yml
+ 
+  tasks:
+    - name: Validate single VM variables
+      ansible.builtin.assert:
+        that:
+          - vm_name | length > 0
+          - vm_cpu | int > 0
+          - vm_ram_mb | int > 0
+          - vm_disk_gb | int > 0
+          - vm_ip is defined
+          - vds_name | length > 0
+          - vds_portgroup | length > 0
+ 
+    - name: Clone and configure VM on Distributed Switch
+      community.vmware.vmware_guest:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_user }}"
+        password: "{{ vcenter_pass }}"
+        validate_certs: true
+        datacenter: "{{ vcenter_datacenter }}"
+        cluster: "{{ vcenter_cluster }}"
+        datastore: "{{ vcenter_datastore }}"
+        template: "{{ vm_template }}"
+        name: "{{ vm_name }}"
+        state: poweredon
+        wait_for_ip_address: true
+        wait_for_ip_address_timeout: 600
+        wait_for_customization: true
+        wait_for_customization_timeout: 600
+        hardware:
+          memory_mb: "{{ vm_ram_mb }}"
+          num_cpus: "{{ vm_cpu }}"
+          scsi: paravirtual
+        disk:
+          - size_gb: "{{ vm_disk_gb }}"
+            type: thin
+            datastore: "{{ vcenter_datastore }}"
+        networks:
+          - name: "{{ vds_portgroup }}"
+            dvswitch_name: "{{ vds_name }}"
+            ip: "{{ vm_ip }}"
+            netmask: "{{ vm_netmask }}"
+            gateway: "{{ vm_gateway }}"
+            type: static
+            connected: true
+            start_connected: true
+        customization:
+          hostname: "{{ vm_name }}"
+          dns_servers: "{{ dns_servers }}"
+      register: vm_deploy_result
+ 
+    - name: Display deployment details
+      ansible.builtin.debug:
+        msg: >-
+          VM {{ vm_deploy_result.instance.hw_name | default(vm_name) }}
+          reported IP {{ vm_deploy_result.instance.ipv4 | default('IP not reported') }}
+
+12.3 Run
+ansible-playbook -i inventory.ini create_single_vm_vds.yml --syntax-check
+ansible-playbook -i inventory.ini create_single_vm_vds.yml --ask-vault-pass
+
+13. Deployment validation
+Perform these checks after every deployment. The automation output alone is not sufficient evidence of a fully operational VM.
+Check	  ======================  Expected result	 ====================================    Evidence / command
+vCenter inventory	    VM exists in intended datacenter/folder/cluster      	          Review VM inventory and task history
+Power state	          Powered on	                                                    vCenter summary
+Hardware	            CPU, RAM and disk match requested values	                      Edit Settings / VM Summary
+NIC	                  Correct port group; connected and Connect at power on enabled	  VM hardware settings
+Guest customization	  Customization completed successfully	                          vCenter Events/Tasks
+Hostname	            Matches requested VM name                                    	  Guest console or SSH: hostnamectl
+IP configuration	    Static address, mask and gateway match plan	                    ip addr; ip route
+DNS	                  Configured resolvers and resolution works                      	resolvectl status; getent hosts
+Network reachability	Gateway and approved destinations reachable	                    ping / traceroute as permitted
+Remote access	        SSH or approved management access succeeds	                    SSH test from admin network
+VMware Tools	        Running/healthy	                                                vCenter Guest Tools status; systemctl status vmtoolsd
+
+
+1.0	19-Nov-2026	Reorganized original notes into an implementation and operations guide; standardized YAML; added validation, troubleshooting, security and rollback guidance.	Infrastructure Operations
+
